@@ -906,4 +906,95 @@ describe("accountProvisioner", () => {
       expect(providers.length).toEqual(2);
     });
   });
+
+  describe("external id", () => {
+    beforeEach(setSelfHosted);
+
+    const signIn = (
+      externalId: string,
+      providerId: string,
+      requestCtx = ctx,
+      teamId?: string
+    ) =>
+      accountProvisioner(requestCtx, {
+        user: {
+          name: faker.person.fullName(),
+          email: faker.internet.email(),
+          emailVerified: true,
+        },
+        team: {
+          teamId,
+          externalId,
+          name: "Org workspace",
+          subdomain: buildSubdomain(),
+        },
+        authenticationProvider: {
+          name: "oidc",
+          providerId,
+        },
+        authentication: {
+          providerId: randomUUID(),
+          accessToken: "123",
+          scopes: ["read"],
+        },
+      });
+
+    it("should create a workspace for the first user of an external id", async () => {
+      await buildTeam();
+      const externalId = randomUUID();
+
+      const { user, team, isNewTeam } = await signIn(
+        externalId,
+        faker.internet.domainName()
+      );
+
+      expect(isNewTeam).toEqual(true);
+      expect(team.externalId).toEqual(externalId);
+      expect(team.name).toEqual("Org workspace");
+      expect(user.teamId).toEqual(team.id);
+      expect(user.isAdmin).toEqual(true);
+    });
+
+    it("should add later users of an external id to the same workspace", async () => {
+      const externalId = randomUUID();
+      const providerId = faker.internet.domainName();
+
+      const first = await signIn(externalId, providerId);
+      const second = await signIn(externalId, providerId);
+
+      expect(second.isNewTeam).toEqual(false);
+      expect(second.isNewUser).toEqual(true);
+      expect(second.team.id).toEqual(first.team.id);
+      expect(second.user.isAdmin).toEqual(false);
+    });
+
+    it("should keep users of different external ids in separate workspaces", async () => {
+      const providerId = faker.internet.domainName();
+
+      const first = await signIn(randomUUID(), providerId);
+      const second = await signIn(randomUUID(), providerId);
+
+      expect(second.isNewTeam).toEqual(true);
+      expect(second.team.id).not.toEqual(first.team.id);
+      expect(second.user.teamId).toEqual(second.team.id);
+    });
+
+    it("should sign in a new user instead of returning an existing admin actor", async () => {
+      const externalId = randomUUID();
+      const providerId = faker.internet.domainName();
+
+      const first = await signIn(externalId, providerId);
+      const adminCtx = createContext({ ip, user: first.user });
+      const second = await signIn(
+        externalId,
+        providerId,
+        adminCtx,
+        first.team.id
+      );
+
+      expect(second.team.id).toEqual(first.team.id);
+      expect(second.user.id).not.toEqual(first.user.id);
+      expect(second.isNewUser).toEqual(true);
+    });
+  });
 });

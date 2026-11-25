@@ -284,7 +284,19 @@ describe("#auth.config", () => {
     expect(body.data.providers[1].name).toBe("Passkeys");
   });
 
-  // Self-hosted auth.config reads the newest team, which other test files create in parallel.
+  it("should not brand the login page with one of several self-hosted teams", async () => {
+    setSelfHosted();
+    await buildTeam();
+    await buildTeam();
+
+    const res = await server.post("/api/auth.config");
+    const body = await res.json();
+    expect(res.status).toEqual(200);
+    expect(body.data.name).toBeUndefined();
+    expect(body.data.providers.length).toBeGreaterThan(0);
+  });
+
+  // Self-hosted auth.config only brands a single team, but other test files create teams in parallel.
   // oxlint-disable-next-line vitest/no-disabled-tests
   describe.skip("self hosted", () => {
     beforeEach(setSelfHosted);

@@ -85,6 +85,24 @@ class OIDCPluginEnvironment extends Environment {
   public OIDC_SCOPES = environment.OIDC_SCOPES ?? "openid profile email";
 
   /**
+   * The OIDC profile field that identifies the workspace a user belongs to.
+   * When set, each distinct value is provisioned as its own workspace and
+   * users are always signed in to the workspace matching their claim.
+   */
+  @IsOptional()
+  public OIDC_TEAM_CLAIM = this.toOptionalString(environment.OIDC_TEAM_CLAIM);
+
+  /**
+   * The OIDC profile field used as the name of a workspace created from
+   * OIDC_TEAM_CLAIM. Defaults to APP_NAME.
+   */
+  @IsOptional()
+  @CannotUseWithout("OIDC_TEAM_CLAIM")
+  public OIDC_TEAM_NAME_CLAIM = this.toOptionalString(
+    environment.OIDC_TEAM_NAME_CLAIM
+  );
+
+  /**
    * Disable autoredirect to the OIDC login page if there is only one
    * authentication method and that method is OIDC.
    */

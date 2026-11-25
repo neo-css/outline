@@ -131,6 +131,16 @@ class Team extends ParanoidModel<
   @Column(DataType.STRING)
   domain: string | null;
 
+  /** The identifier of the team in an external identity provider. */
+  @AllowNull
+  @Unique
+  @Length({
+    max: 255,
+    msg: "externalId must be 255 characters or less",
+  })
+  @Column(DataType.STRING)
+  externalId: string | null;
+
   @IsUUID(4)
   @Column(DataType.UUID)
   defaultCollectionId: string | null;

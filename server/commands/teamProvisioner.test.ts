@@ -1,4 +1,6 @@
 import { faker } from "@faker-js/faker";
+import { randomUUID } from "node:crypto";
+import { Team } from "@server/models";
 import TeamDomain from "@server/models/TeamDomain";
 import { buildTeam, buildUser, buildSubdomain } from "@server/test/factories";
 import { setSelfHosted } from "@server/test/support";
@@ -282,6 +284,145 @@ describe("teamProvisioner", () => {
       expect(team.name).toEqual(existing.name);
       expect(team.subdomain).toEqual(subdomain);
       expect(isNewTeam).toEqual(false);
+    });
+  });
+
+  describe("external id", () => {
+    beforeEach(setSelfHosted);
+
+    const buildProvider = () => ({
+      name: "oidc",
+      providerId: faker.internet.domainName(),
+    });
+
+    it("should create a team for a new external id", async () => {
+      await buildTeam();
+      const externalId = randomUUID();
+      const authenticationProvider = buildProvider();
+
+      const result = await teamProvisioner(ctx, {
+        externalId,
+        name: "Org team",
+        subdomain: buildSubdomain(),
+        authenticationProvider,
+      });
+
+      expect(result.isNewTeam).toEqual(true);
+      expect(result.team.externalId).toEqual(externalId);
+      expect(result.team.name).toEqual("Org team");
+      expect(result.authenticationProvider.providerId).toEqual(
+        authenticationProvider.providerId
+      );
+    });
+
+    it("should return the team matching the external id", async () => {
+      const externalId = randomUUID();
+      const authenticationProvider = buildProvider();
+      const existing = await buildTeam({
+        externalId,
+        authenticationProviders: [authenticationProvider],
+      });
+      await buildTeam({ authenticationProviders: [authenticationProvider] });
+
+      const result = await teamProvisioner(ctx, {
+        externalId,
+        name: "Updated name",
+        subdomain: buildSubdomain(),
+        authenticationProvider,
+      });
+
+      expect(result.isNewTeam).toEqual(false);
+      expect(result.team.id).toEqual(existing.id);
+      expect(result.team.name).toEqual(existing.name);
+    });
+
+    it("should create separate teams for different external ids sharing a provider", async () => {
+      const authenticationProvider = buildProvider();
+
+      const first = await teamProvisioner(ctx, {
+        externalId: randomUUID(),
+        name: "First",
+        subdomain: buildSubdomain(),
+        authenticationProvider,
+      });
+      const second = await teamProvisioner(ctx, {
+        externalId: randomUUID(),
+        name: "Second",
+        subdomain: buildSubdomain(),
+        authenticationProvider,
+      });
+
+      expect(first.isNewTeam).toEqual(true);
+      expect(second.isNewTeam).toEqual(true);
+      expect(second.team.id).not.toEqual(first.team.id);
+    });
+
+    it("should ignore the team from the request", async () => {
+      const requestTeam = await buildTeam();
+      const externalId = randomUUID();
+
+      const result = await teamProvisioner(ctx, {
+        teamId: requestTeam.id,
+        externalId,
+        name: "Org team",
+        subdomain: buildSubdomain(),
+        authenticationProvider: buildProvider(),
+      });
+
+      expect(result.team.id).not.toEqual(requestTeam.id);
+      expect(result.team.externalId).toEqual(externalId);
+    });
+
+    it("should link the provider to an existing team without it", async () => {
+      const externalId = randomUUID();
+      const existing = await buildTeam({ externalId });
+      const authenticationProvider = buildProvider();
+
+      const result = await teamProvisioner(ctx, {
+        externalId,
+        name: "Org team",
+        subdomain: buildSubdomain(),
+        authenticationProvider,
+      });
+
+      expect(result.team.id).toEqual(existing.id);
+      expect(result.authenticationProvider.teamId).toEqual(existing.id);
+      expect(result.authenticationProvider.providerId).toEqual(
+        authenticationProvider.providerId
+      );
+    });
+
+    it("should create a single team for concurrent sign-ins", async () => {
+      const externalId = randomUUID();
+      const authenticationProvider = buildProvider();
+      const provision = () =>
+        teamProvisioner(ctx, {
+          externalId,
+          name: "Org team",
+          subdomain: buildSubdomain(),
+          authenticationProvider,
+        });
+
+      const results = await Promise.all([provision(), provision()]);
+
+      expect(results[0].team.id).toEqual(results[1].team.id);
+      expect(results.filter((result) => result.isNewTeam).length).toEqual(1);
+      expect(await Team.count({ where: { externalId } })).toEqual(1);
+    });
+
+    it("should error when the matching team is deleted", async () => {
+      const externalId = randomUUID();
+      const existing = await buildTeam({ externalId });
+      await existing.destroy();
+
+      await expect(
+        teamProvisioner(ctx, {
+          externalId,
+          name: "Org team",
+          subdomain: buildSubdomain(),
+          authenticationProvider: buildProvider(),
+        })
+      ).rejects.toMatchObject({ id: "pending_deletion" });
     });
   });
 });

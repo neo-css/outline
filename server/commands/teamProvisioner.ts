@@ -27,6 +27,11 @@ type Props = {
    * subdomain that the request came from, if any.
    */
   teamId?: string;
+  /**
+   * The identifier of the team in the identity provider. When provided the
+   * team is found or created by this identifier instead of the request.
+   */
+  externalId?: string;
   /** The displayed name of the team */
   name: string;
   /** The domain name from the email of the user logging in */
@@ -46,8 +51,26 @@ type Props = {
 
 async function teamProvisioner(
   ctx: APIContext,
-  { teamId, name, domain, subdomain, avatarUrl, authenticationProvider }: Props
+  {
+    teamId,
+    externalId,
+    name,
+    domain,
+    subdomain,
+    avatarUrl,
+    authenticationProvider,
+  }: Props
 ): Promise<TeamProvisionerResult> {
+  if (externalId) {
+    return provisionExternalTeam({
+      externalId,
+      name,
+      subdomain,
+      avatarUrl,
+      authenticationProvider,
+    });
+  }
+
   const where = teamId
     ? { ...authenticationProvider, teamId }
     : authenticationProvider;
@@ -151,6 +174,70 @@ async function teamProvisioner(
     authenticationProvider: team.authenticationProviders[0],
     isNewTeam: true,
   };
+}
+
+/**
+ * Finds or creates the team identified by the identity provider, linking it
+ * to the authentication provider being used. Concurrent first sign-ins for the
+ * same identifier resolve to a single team.
+ *
+ * @param props the external team identifier and creation details.
+ * @returns the team, its authentication provider and whether it was created.
+ * @throws TeamPendingDeletionError if the matching team has been deleted.
+ */
+async function provisionExternalTeam({
+  externalId,
+  name,
+  subdomain,
+  avatarUrl,
+  authenticationProvider,
+}: Omit<Props, "teamId" | "domain" | "externalId"> & {
+  externalId: string;
+}): Promise<TeamProvisionerResult> {
+  return retryOnUniqueConstraintError(async () => {
+    const existingTeam = await Team.findOne({
+      where: { externalId },
+      paranoid: false,
+    });
+
+    if (existingTeam?.deletedAt) {
+      throw TeamPendingDeletionError();
+    }
+
+    if (existingTeam) {
+      const authP =
+        (await AuthenticationProvider.findOne({
+          where: { ...authenticationProvider, teamId: existingTeam.id },
+          order: [["enabled", "DESC"]],
+        })) ??
+        (await existingTeam.$create<AuthenticationProvider>(
+          "authenticationProvider",
+          authenticationProvider
+        ));
+
+      return {
+        team: existingTeam,
+        authenticationProvider: authP,
+        isNewTeam: false,
+      };
+    }
+
+    const team = await sequelize.transaction((transaction) =>
+      teamCreator(createContext({ transaction }), {
+        name,
+        subdomain,
+        avatarUrl,
+        externalId,
+        authenticationProviders: [authenticationProvider],
+      })
+    );
+
+    return {
+      team,
+      authenticationProvider: team.authenticationProviders[0],
+      isNewTeam: true,
+    };
+  });
 }
 
 export default traceFunction({

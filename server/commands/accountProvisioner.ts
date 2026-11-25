@@ -48,6 +48,11 @@ type Props = {
      * subdomain that the request came from, if any.
      */
     teamId?: string;
+    /**
+     * The identifier of the team in the identity provider. When provided the
+     * user is signed in to the team with this identifier, created if needed.
+     */
+    externalId?: string;
     /** The displayed name of the team */
     name?: string;
     /** The domain name from the email of the user logging in */
@@ -104,7 +109,12 @@ async function accountProvisioner(
 
   // If the user is already logged in and is an admin of the team then we
   // allow them to connect a new authentication provider.
-  if (actor && actor.teamId === teamParams.teamId && actor.isAdmin) {
+  if (
+    actor &&
+    !teamParams.externalId &&
+    actor.teamId === teamParams.teamId &&
+    actor.isAdmin
+  ) {
     const team = actor.team;
     const authenticationProvider = await AuthenticationProvider.findOne({
       where: {

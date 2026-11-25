@@ -12,6 +12,7 @@ import accountProvisioner from "@server/commands/accountProvisioner";
 import { AuthenticationError } from "@server/errors";
 import Logger from "@server/logging/Logger";
 import passportMiddleware from "@server/middlewares/passport";
+import { Team } from "@server/models";
 import type { User } from "@server/models";
 import type { AuthenticationResult } from "@server/types";
 import { LogoutTokenStore } from "@server/utils/LogoutTokenStore";
@@ -28,6 +29,7 @@ import config from "../../plugin.json";
 import env from "../env";
 import { OIDCStrategy } from "./OIDCStrategy";
 import { resolveProviderId } from "./resolveProviderId";
+import { getTeamClaim } from "./teamClaim";
 import { createContext } from "@server/context";
 import { OIDCMalformedUserInfoError } from "../errors";
 
@@ -139,11 +141,21 @@ export function createOIDCRouter(
                 ? undefined
                 : emailVerifiedClaim === true || emailVerifiedClaim === "true";
 
-            const team = await getTeamFromContext(context);
+            // When workspaces are assigned by the identity provider the team is
+            // chosen from the claim rather than the request, and any existing
+            // browser session is ignored so sign-in always resolves the
+            // incoming identity.
+            const teamClaim = getTeamClaim(profile, token);
+            const team = teamClaim
+              ? await Team.findOne({
+                  where: { externalId: teamClaim.externalId },
+                })
+              : await getTeamFromContext(context);
             const client = getClientFromOAuthState(context);
-            const user =
-              context.state?.auth?.user ??
-              (await getUserFromOAuthState(context));
+            const user = teamClaim
+              ? undefined
+              : (context.state?.auth?.user ??
+                (await getUserFromOAuthState(context)));
             const { domain } = parseEmail(email);
 
             const providerId = await resolveProviderId(
@@ -201,7 +213,8 @@ export function createOIDCRouter(
             const result = await accountProvisioner(ctx, {
               team: {
                 teamId: team?.id,
-                name: env.APP_NAME,
+                externalId: teamClaim?.externalId,
+                name: teamClaim?.name ?? env.APP_NAME,
                 domain,
                 subdomain,
               },
