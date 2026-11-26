@@ -361,16 +361,14 @@ export async function getTeamFromContext(
   const domain = parseDomain(host);
 
   let team;
-  if (!env.isCloudHosted) {
+  if (context.state?.rootShare) {
+    team = await Team.findByPk(context.state.rootShare.teamId);
+  } else if (!env.isCloudHosted) {
     if (env.ENVIRONMENT === "test") {
       team = await Team.findByDomain(env.URL);
     } else {
-      team = await Team.findOne({
-        order: [["createdAt", "DESC"]],
-      });
+      team = await Team.findSingle();
     }
-  } else if (context.state?.rootShare) {
-    team = await Team.findByPk(context.state.rootShare.teamId);
   } else if (domain.custom) {
     team = await Team.findByDomain(domain.host);
   } else if (domain.teamSubdomain) {

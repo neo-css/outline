@@ -10,7 +10,7 @@ import {
   buildTeam,
   buildSubdomain,
 } from "@server/test/factories";
-import { getTestServer } from "@server/test/support";
+import { getTestServer, setSelfHosted } from "@server/test/support";
 
 const server = getTestServer();
 
@@ -265,6 +265,19 @@ describe("email", () => {
       expect(body.success).toEqual(true);
       expect(spy).toHaveBeenCalled();
       spy.mockRestore();
+    });
+    it("should reject email sign-in when self-hosted has multiple teams", async () => {
+      setSelfHosted();
+      const team = await buildTeam({ guestSignin: true });
+      await buildTeam({ guestSignin: true });
+      const user = await buildGuestUser({ teamId: team.id });
+
+      const res = await server.post("/auth/email", {
+        body: {
+          email: user.email,
+        },
+      });
+      expect(res.status).toEqual(403);
     });
   });
 

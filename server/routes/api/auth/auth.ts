@@ -34,27 +34,29 @@ router.post("auth.config", async (ctx: APIContext<T.AuthConfigReq>) => {
   // brand for the knowledge base and its guest sign-in option is used for the
   // root login page. With several teams no single team is shown.
   if (!env.isCloudHosted) {
-    const teams = await Team.scope("withAuthenticationProviders").findAll({
-      order: [["createdAt", "DESC"]],
-      limit: 2,
+    const team = await Team.findSingle({
+      scope: "withAuthenticationProviders",
     });
-    const team = teams.length === 1 ? teams[0] : undefined;
 
-    if (team) {
-      ctx.body = {
-        data: {
-          name: team.name,
-          customTheme: team.getPreference(TeamPreference.CustomTheme),
-          logo: team.getPreference(TeamPreference.PublicBranding)
-            ? team.avatarUrl
-            : undefined,
-          providers: (await AuthenticationHelper.providersForTeam(team)).map(
-            presentProviderConfig
-          ),
-        },
-      };
-      return;
-    }
+    ctx.body = {
+      data: team
+        ? {
+            name: team.name,
+            customTheme: team.getPreference(TeamPreference.CustomTheme),
+            logo: team.getPreference(TeamPreference.PublicBranding)
+              ? team.avatarUrl
+              : undefined,
+            providers: (await AuthenticationHelper.providersForTeam(team)).map(
+              presentProviderConfig
+            ),
+          }
+        : {
+            providers: (await AuthenticationHelper.providersForTeam()).map(
+              presentProviderConfig
+            ),
+          },
+    };
+    return;
   }
 
   const domain = parseDomain(ctx.request.hostname);
@@ -179,14 +181,20 @@ router.post("auth.info", auth(), async (ctx: APIContext<T.AuthInfoReq>) => {
         type === AuthenticationType.APP
           ? user.getCollaborationToken()
           : undefined,
-      availableTeams: uniqBy([...rememberedTeams, ...availableTeams], "id").map(
-        (availableTeam) =>
+      availableTeams: uniqBy([...rememberedTeams, ...availableTeams], "id")
+        .filter(
+          (availableTeam) =>
+            env.isCloudHosted ||
+            availableTeam.id === team.id ||
+            availableTeam.url !== team.url
+        )
+        .map((availableTeam) =>
           presentAvailableTeam(
             availableTeam,
             signedInTeamIds.has(availableTeam.id) ||
               availableTeam.id === user.teamId
           )
-      ),
+        ),
     },
     policies: presentPolicies(user, [team, user, ...groups]),
   };

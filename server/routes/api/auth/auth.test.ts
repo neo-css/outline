@@ -107,6 +107,24 @@ describe("#auth.info", () => {
     expect(res.status).toEqual(401);
   });
 
+  it("should omit other workspaces at the same URL on self-hosted installations", async () => {
+    setSelfHosted();
+    const team = await buildTeam();
+    const team2 = await buildTeam();
+    const user = await buildUser({ teamId: team.id });
+    await buildUser({
+      teamId: team2.id,
+      email: user.email,
+    });
+
+    const res = await server.post("/api/auth.info", user);
+    const body = await res.json();
+    expect(res.status).toEqual(200);
+    expect(body.data.availableTeams.map((t: { id: string }) => t.id)).toEqual([
+      team.id,
+    ]);
+  });
+
   it("should require authentication", async () => {
     const res = await server.post("/api/auth.info");
     expect(res.status).toEqual(401);
@@ -286,13 +304,21 @@ describe("#auth.config", () => {
 
   it("should not brand the login page with one of several self-hosted teams", async () => {
     setSelfHosted();
-    await buildTeam();
+    const domain = faker.internet.domainName();
+    await buildTeam({ domain, guestSignin: true });
     await buildTeam();
 
-    const res = await server.post("/api/auth.config");
+    const res = await server.post("/api/auth.config", {
+      headers: {
+        host: domain,
+      },
+    });
     const body = await res.json();
     expect(res.status).toEqual(200);
     expect(body.data.name).toBeUndefined();
+    expect(
+      body.data.providers.some((p: { id: string }) => p.id === "email")
+    ).toBe(false);
     expect(body.data.providers.length).toBeGreaterThan(0);
   });
 

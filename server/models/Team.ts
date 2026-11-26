@@ -602,6 +602,26 @@ class Team extends ParanoidModel<
   };
 
   /**
+   * Finds the sole active team in the installation, or null when zero or
+   * multiple teams exist.
+   *
+   * @param options additional find options and optional scope to apply.
+   * @returns the sole team, or null when zero or multiple teams exist.
+   */
+  static async findSingle(
+    options?: FindOptions<Team> & { scope?: string | string[] }
+  ): Promise<Team | null> {
+    const { scope, ...findOptions } = options ?? {};
+    const model = scope ? this.scope(scope) : this;
+    const teams = await model.findAll({
+      ...findOptions,
+      limit: 2,
+    });
+
+    return teams.length === 1 ? teams[0] : null;
+  }
+
+  /**
    * Find a team by its custom domain. The input is normalized by stripping
    * protocol, port, path, and lowercasing to match the stored format.
    *

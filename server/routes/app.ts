@@ -319,6 +319,7 @@ export const renderShare = async (ctx: Context, next: Next) => {
       teamId: team?.id,
     });
     share = result.share;
+    team = share.team;
     collection = result.collection;
     document = result.document;
     sharedTree = result.sharedTree;

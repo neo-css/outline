@@ -828,6 +828,35 @@ describe("#shares.info", () => {
     expect(res.status).toEqual(403);
   });
 
+  it("should not include lastAccessedAt for an admin from another team", async () => {
+    const owner = await buildAdmin();
+    const otherAdmin = await buildAdmin();
+    const document = await buildDocument({
+      userId: owner.id,
+      teamId: owner.teamId,
+    });
+    const share = await buildShare({
+      documentId: document.id,
+      teamId: owner.teamId,
+      userId: owner.id,
+      lastAccessedAt: new Date(),
+    });
+
+    const otherRes = await server.post("/api/shares.info", otherAdmin, {
+      body: { id: share.id },
+    });
+    const otherBody = await otherRes.json();
+    expect(otherRes.status).toEqual(200);
+    expect(otherBody.data.shares[0].lastAccessedAt).toBeUndefined();
+
+    const ownerRes = await server.post("/api/shares.info", owner, {
+      body: { id: share.id },
+    });
+    const ownerBody = await ownerRes.json();
+    expect(ownerRes.status).toEqual(200);
+    expect(ownerBody.data.shares[0].lastAccessedAt).toBeTruthy();
+  });
+
   it("should succeed with status 200 ok", async () => {
     const user = await buildUser();
     const document = await buildDocument({

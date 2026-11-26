@@ -1,4 +1,5 @@
 import { faker } from "@faker-js/faker";
+import { randomUUID } from "node:crypto";
 import { addDays, subDays } from "date-fns";
 import { DocumentPermission } from "@shared/types";
 import { UserMembership } from "@server/models";
@@ -9,6 +10,7 @@ import {
   buildTeam,
   buildUser,
 } from "@server/test/factories";
+import { setSelfHosted } from "@server/test/support";
 import { loadPublicShare, loadShareWithParent } from "./shareLoader";
 
 describe("shareLoader", () => {
@@ -623,6 +625,55 @@ describe("shareLoader", () => {
       await expect(
         loadPublicShare({ id: share.id, teamId: team.id })
       ).rejects.toThrow("Resource not found");
+    });
+
+    it("should require teamId for custom urlId when cloud hosted", async () => {
+      const urlId = `slug-${randomUUID().slice(0, 8)}`;
+      const user = await buildUser();
+      await buildShare({
+        userId: user.id,
+        teamId: user.teamId,
+        urlId,
+      });
+
+      await expect(loadPublicShare({ id: urlId })).rejects.toThrow(
+        "teamId required for fetching share using urlId"
+      );
+    });
+
+    it("should resolve a unique custom urlId without teamId when self hosted", async () => {
+      setSelfHosted();
+      const urlId = `slug-${randomUUID().slice(0, 8)}`;
+      const user = await buildUser();
+      const share = await buildShare({
+        userId: user.id,
+        teamId: user.teamId,
+        urlId,
+      });
+
+      const result = await loadPublicShare({ id: urlId });
+      expect(result.share.id).toEqual(share.id);
+    });
+
+    it("should reject an ambiguous custom urlId across self-hosted teams", async () => {
+      setSelfHosted();
+      const urlId = `slug-${randomUUID().slice(0, 8)}`;
+      const userA = await buildUser();
+      const userB = await buildUser();
+      await buildShare({
+        userId: userA.id,
+        teamId: userA.teamId,
+        urlId,
+      });
+      await buildShare({
+        userId: userB.id,
+        teamId: userB.teamId,
+        urlId,
+      });
+
+      await expect(loadPublicShare({ id: urlId })).rejects.toThrow(
+        "Resource not found"
+      );
     });
   });
 });

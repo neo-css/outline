@@ -9,6 +9,31 @@ import {
 } from "@server/test/factories";
 
 describe("Team", () => {
+  describe("findSingle", () => {
+    it("should return the team when exactly one matches", async () => {
+      const externalId = `single-${randomUUID()}`;
+      const team = await buildTeam({ externalId });
+
+      const result = await Team.findSingle({ where: { externalId } });
+      expect(result?.id).toEqual(team.id);
+    });
+
+    it("should return null when no teams match", async () => {
+      const result = await Team.findSingle({
+        where: { externalId: `missing-${randomUUID()}` },
+      });
+      expect(result).toBeNull();
+    });
+
+    it("should return null when multiple teams exist", async () => {
+      await buildTeam();
+      await buildTeam();
+
+      const result = await Team.findSingle();
+      expect(result).toBeNull();
+    });
+  });
+
   describe("findByDomain", () => {
     it("should find a team by its domain", async () => {
       const domain = `${randomUUID()}.example.com`;

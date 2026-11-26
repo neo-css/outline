@@ -33,7 +33,7 @@ router.post(
 
     let team: Team | null | undefined;
     if (!env.isCloudHosted) {
-      team = await Team.scope("withAuthenticationProviders").findOne();
+      team = await Team.findSingle({ scope: "withAuthenticationProviders" });
     } else if (domain.custom) {
       team = await Team.scope("withAuthenticationProviders").findOne({
         where: { domain: domain.host.toLowerCase() },

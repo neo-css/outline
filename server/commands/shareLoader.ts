@@ -3,6 +3,7 @@ import { Op } from "sequelize";
 import isUUID from "validator/lib/isUUID";
 import type { NavigationNode } from "@shared/types";
 import { UrlHelper } from "@shared/utils/UrlHelper";
+import env from "@server/env";
 import {
   AuthorizationError,
   InvalidRequestError,
@@ -29,7 +30,7 @@ export async function loadPublicShare({
   const urlId =
     !isUUID(id) && UrlHelper.SHARE_URL_SLUG_REGEX.test(id) ? id : undefined;
 
-  if (urlId && !teamId) {
+  if (urlId && !teamId && env.isCloudHosted) {
     throw InvalidRequestError("teamId required for fetching share using urlId");
   }
 
@@ -42,31 +43,39 @@ export async function loadPublicShare({
 
   if (urlId) {
     where.urlId = id;
-    where.teamId = teamId;
+    if (teamId) {
+      where.teamId = teamId;
+    }
   } else {
     where.id = id;
   }
 
-  const share = await Share.findOne({
-    where,
-    include: [
-      {
-        model: Document.scope("withDrafts"),
-        as: "document",
-        include: [
-          {
-            model: Collection.scope("withDocumentStructure"),
-            as: "collection",
-            required: false,
-          },
-        ],
-      },
-      {
-        model: Collection.scope("withDocumentStructure"),
-        as: "collection",
-      },
-    ],
-  });
+  const include = [
+    {
+      model: Document.scope("withDrafts"),
+      as: "document",
+      include: [
+        {
+          model: Collection.scope("withDocumentStructure"),
+          as: "collection",
+          required: false,
+        },
+      ],
+    },
+    {
+      model: Collection.scope("withDocumentStructure"),
+      as: "collection",
+    },
+  ];
+
+  // On multi-team self-hosted installations all workspaces share a single host,
+  // so resolve a custom slug only when it uniquely identifies one share.
+  const share =
+    urlId && !teamId
+      ? await Share.findAll({ where, include, limit: 2 }).then((shares) =>
+          shares.length === 1 ? shares[0] : null
+        )
+      : await Share.findOne({ where, include });
 
   if (
     !share ||
