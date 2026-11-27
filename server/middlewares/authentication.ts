@@ -296,6 +296,12 @@ async function validateAuthentication(
     });
   }
 
+  if (user.workspaceAdminSourceId && type !== AuthenticationType.APP) {
+    throw AuthorizationError(
+      "Workspace operator accounts require an app session"
+    );
+  }
+
   if (options.role && UserRoleHelper.isRoleLower(user.role, options.role)) {
     throw AuthorizationError(`${capitalize(options.role)} role required`);
   }

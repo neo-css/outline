@@ -1,7 +1,11 @@
 import { faker } from "@faker-js/faker";
 import { randomUUID } from "node:crypto";
-import { Scope } from "@shared/types";
+import { CSRF } from "@shared/constants";
+import { Scope, UserRole } from "@shared/types";
+import env from "@server/env";
+import { User } from "@server/models";
 import {
+  buildAdmin,
   buildApiKey,
   buildOAuthAuthentication,
   buildUser,
@@ -10,6 +14,7 @@ import {
   buildSubdomain,
 } from "@server/test/factories";
 import { getTestServer, setSelfHosted } from "@server/test/support";
+import { bundleToken, generateRawToken } from "@server/utils/csrf";
 
 const server = getTestServer();
 
@@ -128,6 +133,137 @@ describe("#auth.info", () => {
   it("should require authentication", async () => {
     const res = await server.post("/api/auth.info");
     expect(res.status).toEqual(401);
+  });
+});
+
+describe("#auth.switchWorkspace", () => {
+  const originalOperators = env.WORKSPACE_OPERATOR_USER_IDS;
+
+  beforeEach(() => {
+    setSelfHosted();
+  });
+
+  afterEach(() => {
+    env.WORKSPACE_OPERATOR_USER_IDS = originalOperators;
+  });
+
+  function sessionCookie(user: User) {
+    return `accessToken=${user.getSessionToken(new Date(Date.now() + 60_000), "oidc")}`;
+  }
+
+  function switchWorkspace(cookie: string, teamId: string) {
+    const csrf = bundleToken(generateRawToken(16), env.SECRET_KEY);
+
+    return server.post("/api/auth.switchWorkspace", {
+      body: { teamId },
+      headers: {
+        Cookie: `${cookie}; ${CSRF.cookieName}=${csrf}`,
+        [CSRF.headerName]: csrf,
+      },
+    });
+  }
+
+  function switchedCookie(
+    response: Awaited<ReturnType<typeof switchWorkspace>>
+  ) {
+    expect(response.status).toEqual(200);
+    const cookies = response.headers.raw()["set-cookie"];
+    const cookie = cookies?.find((value) => value.startsWith("accessToken="));
+    if (!cookie) {
+      throw new Error("Expected a workspace session cookie");
+    }
+    return cookie.split(";")[0];
+  }
+
+  it("creates one admin per workspace and lets an operator continue switching", async () => {
+    const operator = await buildUser();
+    const otherOperator = await buildUser();
+    const teamB = await buildTeam();
+    const teamC = await buildTeam();
+    env.WORKSPACE_OPERATOR_USER_IDS = [operator.id, otherOperator.id];
+
+    const cookie = sessionCookie(operator);
+    const info = await server.post("/api/auth.info", {
+      headers: { Cookie: cookie },
+    });
+    const data = (await info.json()).data;
+    expect(data.availableTeams).toEqual(
+      expect.arrayContaining(
+        [operator.teamId, teamB.id, teamC.id].map((id) =>
+          expect.objectContaining({ id, canSwitchInPlace: true })
+        )
+      )
+    );
+
+    const requests = await Promise.all([
+      switchWorkspace(cookie, teamB.id),
+      switchWorkspace(cookie, teamB.id),
+    ]);
+    const [inB] = requests.map(switchedCookie);
+    const b = await server.post("/api/auth.info", {
+      headers: { Cookie: inB },
+    });
+    const bData = (await b.json()).data;
+    expect(bData.team.id).toEqual(teamB.id);
+    expect(bData.user.role).toEqual(UserRole.Admin);
+    expect(bData.user.id).not.toEqual(operator.id);
+    expect(
+      await User.count({
+        where: { workspaceAdminSourceId: operator.id, teamId: teamB.id },
+      })
+    ).toEqual(1);
+
+    const inC = switchedCookie(await switchWorkspace(inB, teamC.id));
+    const backInB = switchedCookie(await switchWorkspace(inC, teamB.id));
+    const back = await server.post("/api/auth.info", {
+      headers: { Cookie: backInB },
+    });
+    expect((await back.json()).data.user.id).toEqual(bData.user.id);
+
+    const otherInB = switchedCookie(
+      await switchWorkspace(sessionCookie(otherOperator), teamB.id)
+    );
+    const other = await server.post("/api/auth.info", {
+      headers: { Cookie: otherInB },
+    });
+    const otherData = (await other.json()).data;
+    expect(otherData.user.role).toEqual(UserRole.Admin);
+    expect(otherData.user.id).not.toEqual(bData.user.id);
+
+    const mapped = await User.findByPk(bData.user.id, { rejectOnEmpty: true });
+    const unmarkedSession = await server.post("/api/auth.info", {
+      headers: { Cookie: sessionCookie(mapped) },
+    });
+    expect(unmarkedSession.status).toEqual(401);
+
+    env.WORKSPACE_OPERATOR_USER_IDS = [otherOperator.id];
+    const revoked = await server.post("/api/auth.info", {
+      headers: { Cookie: backInB },
+    });
+    expect(revoked.status).toEqual(401);
+    expect(
+      (await server.post("/api/auth.info", { headers: { Cookie: otherInB } }))
+        .status
+    ).toEqual(200);
+  });
+
+  it("keeps the switch unavailable to an ordinary administrator or member", async () => {
+    const operator = await buildUser();
+    const target = await buildTeam();
+    const admin = await buildAdmin();
+    const member = await buildUser();
+    env.WORKSPACE_OPERATOR_USER_IDS = [operator.id];
+
+    for (const user of [admin, member]) {
+      const cookie = sessionCookie(user);
+      const info = await server.post("/api/auth.info", {
+        headers: { Cookie: cookie },
+      });
+      expect((await info.json()).data.availableTeams).toEqual([
+        expect.not.objectContaining({ canSwitchInPlace: true }),
+      ]);
+      expect((await switchWorkspace(cookie, target.id)).status).toEqual(403);
+    }
   });
 });
 

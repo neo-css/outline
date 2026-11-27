@@ -7,6 +7,7 @@ import Redis from "@server/storage/redis";
 import { AuthenticationError, UserSuspendedError } from "../errors";
 import { hash } from "./crypto";
 import { RedisPrefixHelper } from "./RedisPrefixHelper";
+import { getWorkspaceOperator } from "./workspaceOperator";
 import type { Context } from "koa";
 
 /**
@@ -87,6 +88,15 @@ export async function getUserForJWT(
     throw UserSuspendedError({
       adminEmail: suspendingAdmin?.email || undefined,
     });
+  }
+
+  if (
+    user.workspaceAdminSourceId &&
+    (payload.workspaceAdminSourceId !== user.workspaceAdminSourceId ||
+      !user.isAdmin ||
+      !(await getWorkspaceOperator(user)))
+  ) {
+    throw AuthenticationError("Workspace operator access required");
   }
 
   if (payload.type === "transfer") {

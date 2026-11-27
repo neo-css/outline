@@ -1,5 +1,6 @@
 import { ArrowIcon, PlusIcon } from "outline-icons";
 import styled from "styled-components";
+import { toast } from "sonner";
 import { stringToColor } from "@shared/utils/color";
 import type RootStore from "~/stores/RootStore";
 import { LoginDialog } from "~/scenes/Login/components/LoginDialog";
@@ -10,44 +11,66 @@ import {
   createActionWithChildren,
   createExternalLinkAction,
 } from "~/actions";
-import type { ActionContext, ExternalLinkAction } from "~/types";
+import type { ActionContext, Action, ExternalLinkAction } from "~/types";
+import isCloudHosted from "~/utils/isCloudHosted";
 import Desktop from "~/utils/Desktop";
 import { dialogActionFactory } from "./common";
 import { TeamSection } from "../sections";
 
 /**
- * Builds workspace links, indicating which workspaces require login.
+ * Builds the workspace actions available to the current user.
  *
  * @param context the stores containing available workspaces.
  * @returns the workspace switching actions.
  */
 export const switchTeamsList = ({ stores }: { stores: RootStore }) =>
-  stores.auth.availableTeams?.map<ExternalLinkAction>((session) =>
-    createExternalLinkAction({
-      id: `switch-${session.id}`,
-      name: session.name,
-      badge: ({ t }) => (session.isSignedIn ? undefined : t("Logged out")),
-      analyticsName: "Switch workspace",
-      section: TeamSection,
-      keywords: "change switch workspace organization team",
-      icon: (
-        <StyledTeamLogo
-          alt={session.name}
-          model={{
-            initial: session.name[0],
-            avatarUrl: session.avatarUrl,
-            id: session.id,
-            color: stringToColor(session.id),
-          }}
-          size={24}
-        />
-      ),
-      visible: ({ currentTeamId }: ActionContext) =>
-        currentTeamId !== session.id,
-      url: session.url,
-      target: "_self",
-    })
-  ) ?? [];
+  stores.auth.availableTeams
+    ?.filter((session) => isCloudHosted || session.canSwitchInPlace)
+    .map<Action | ExternalLinkAction>((session) => {
+      const action = {
+        id: `switch-${session.id}`,
+        name: session.name,
+        analyticsName: "Switch workspace",
+        section: TeamSection,
+        keywords: "change switch workspace organization team",
+        icon: (
+          <StyledTeamLogo
+            alt={session.name}
+            model={{
+              initial: session.name[0],
+              avatarUrl: session.avatarUrl,
+              id: session.id,
+              color: stringToColor(session.id),
+            }}
+            size={24}
+          />
+        ),
+        visible: ({ currentTeamId }: ActionContext) =>
+          currentTeamId !== session.id,
+      };
+
+      if (isCloudHosted) {
+        return createExternalLinkAction({
+          ...action,
+          badge: ({ t }) => (session.isSignedIn ? undefined : t("Logged out")),
+          url: session.url,
+          target: "_self",
+        });
+      }
+
+      return createAction({
+        ...action,
+        perform: async () => {
+          try {
+            await stores.auth.switchWorkspace(session.id);
+          } catch (error) {
+            if (error instanceof Error) {
+              toast.error(error.message);
+            }
+          }
+        },
+      });
+    }) ?? [];
 
 export const switchTeam = createActionWithChildren({
   name: ({ t }) => t("Switch workspace"),
@@ -55,8 +78,12 @@ export const switchTeam = createActionWithChildren({
   analyticsName: "Switch workspace",
   keywords: "change switch workspace organization team",
   section: TeamSection,
-  visible: ({ stores }) =>
-    !!stores.auth.availableTeams && stores.auth.availableTeams?.length > 1,
+  visible: ({ stores, currentTeamId }) =>
+    isCloudHosted
+      ? (stores.auth.availableTeams?.length ?? 0) > 1
+      : (stores.auth.availableTeams?.some(
+          (session) => session.id !== currentTeamId && session.canSwitchInPlace
+        ) ?? false),
   children: switchTeamsList,
 });
 

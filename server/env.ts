@@ -896,6 +896,12 @@ export class Environment {
     environment.ALLOWED_PRIVATE_IP_ADDRESSES
   );
 
+  /** Outline user IDs allowed to switch and administer self-hosted workspaces. */
+  @IsOptional()
+  public WORKSPACE_OPERATOR_USER_IDS = this.toOptionalCommaList(
+    environment.WORKSPACE_OPERATOR_USER_IDS
+  );
+
   /**
    * The search provider to use. Defaults to "postgres" which uses PostgreSQL
    * full-text search. Alternative providers can be registered via plugins.

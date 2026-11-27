@@ -264,6 +264,10 @@ class User extends ParanoidModel<
   @Column(DataType.UUID)
   teamId: string;
 
+  /** The original operator account for a workspace-specific admin account. */
+  @Column(DataType.UUID)
+  workspaceAdminSourceId: string | null;
+
   @HasMany(() => UserAuthentication)
   authentications: UserAuthentication[];
 
@@ -636,15 +640,21 @@ class User extends ParanoidModel<
    *
    * @param expiresAt The time the token will expire at
    * @param service The authentication service used to generate the token, if applicable
+   * @param workspaceAdminSourceId The operator authorized to use a mapped account
    * @returns The session token
    */
-  getSessionToken = (expiresAt?: Date, service?: string) =>
+  getSessionToken = (
+    expiresAt?: Date,
+    service?: string,
+    workspaceAdminSourceId?: string
+  ) =>
     JWT.sign(
       {
         id: this.id,
         expiresAt: expiresAt ? expiresAt.toISOString() : undefined,
         type: "session",
         service,
+        workspaceAdminSourceId,
       },
       this.jwtSecret
     );
@@ -661,6 +671,7 @@ class User extends ParanoidModel<
         id: this.id,
         expiresAt: addHours(new Date(), 24).toISOString(),
         type: "collaboration",
+        workspaceAdminSourceId: this.workspaceAdminSourceId ?? undefined,
       },
       this.jwtSecret
     );

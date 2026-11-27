@@ -28,6 +28,7 @@ import Desktop from "~/utils/Desktop";
 import { deleteAllDatabases } from "~/utils/developer";
 import Logger from "~/utils/Logger";
 import isCloudHosted from "~/utils/isCloudHosted";
+import { homePath } from "~/utils/routeHelpers";
 import Store from "./base/Store";
 
 type PersistedData = Pick<
@@ -72,6 +73,7 @@ export default class AuthStore extends Store<Team> {
     avatarUrl: string;
     url: string;
     isSignedIn: boolean;
+    canSwitchInPlace?: boolean;
   }[] = undefined;
 
   /* The authentication provider the user signed in with. */
@@ -117,6 +119,13 @@ export default class AuthStore extends Store<Team> {
     // listen to the localstorage value changing in other tabs to react to
     // signin/signout events in other tabs and follow suit.
     window.addEventListener("storage", (event) => {
+      if (event.key === this.name && event.newValue === null) {
+        if (!isCloudHosted && this.authenticated) {
+          window.location.replace(homePath());
+        }
+        return;
+      }
+
       if (event.key === this.name && event.newValue) {
         const newData: PersistedData | null = JSON.parse(event.newValue);
 
@@ -331,6 +340,19 @@ export default class AuthStore extends Store<Team> {
     } finally {
       this.isSaving = false;
     }
+  };
+
+  /**
+   * Switches the browser session to the selected operator workspace.
+   *
+   * @param teamId the ID of the workspace to open.
+   */
+  switchWorkspace = async (teamId: string) => {
+    await client.post("/auth.switchWorkspace", { teamId });
+
+    // The next page must resolve the new session before opening a team cache.
+    Storage.remove(this.name);
+    window.location.replace(homePath());
   };
 
   /**
