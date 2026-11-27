@@ -3,7 +3,12 @@ import { allow } from "./cancan";
 import { and, isTeamModel, isTeamMutable } from "./utils";
 
 allow(User, "createUserPasskey", Team, (actor, team) =>
-  and(isTeamModel(actor, team), isTeamMutable(actor), !!team?.passkeysEnabled)
+  and(
+    isTeamModel(actor, team),
+    isTeamMutable(actor),
+    !actor.workspaceAdminSourceId,
+    !!team?.passkeysEnabled
+  )
 );
 
 allow(

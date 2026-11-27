@@ -38,11 +38,18 @@ allow(User, "addGuest", Team, (actor, team) =>
   )
 );
 
-allow(User, ["update", "readDetails", "listApiKeys"], User, (actor, user) =>
+allow(User, ["readDetails", "listApiKeys"], User, (actor, user) =>
   or(
     //
     isTeamAdmin(actor, user),
     actor.id === user?.id
+  )
+);
+
+allow(User, "update", User, (actor, user) =>
+  or(
+    actor.id === user?.id,
+    and(!user?.workspaceAdminSourceId, isTeamAdmin(actor, user))
   )
 );
 
@@ -70,23 +77,31 @@ allow(User, "readEmail", [User, Team], (actor, model) => {
 });
 
 allow(User, "delete", User, (actor, user) =>
-  or(
-    isTeamAdmin(actor, user),
-    and(
-      actor.id === user?.id,
-      !!actor.team.getPreference(TeamPreference.MembersCanDeleteAccount)
+  and(
+    !user?.workspaceAdminSourceId,
+    or(
+      isTeamAdmin(actor, user),
+      and(
+        actor.id === user?.id,
+        !!actor.team.getPreference(TeamPreference.MembersCanDeleteAccount)
+      )
     )
   )
 );
 
 allow(User, ["activate", "suspend"], User, (actor, user) =>
-  and(isTeamAdmin(actor, user), user?.id !== actor.id)
+  and(
+    isTeamAdmin(actor, user),
+    !user?.workspaceAdminSourceId,
+    user?.id !== actor.id
+  )
 );
 
 allow(User, "promote", User, (actor, user) =>
   and(
     //
     isTeamAdmin(actor, user),
+    !user?.workspaceAdminSourceId,
     !user?.isAdmin,
     !user?.isSuspended,
     user?.id !== actor.id
@@ -97,6 +112,7 @@ allow(User, "demote", User, (actor, user) =>
   and(
     //
     isTeamAdmin(actor, user),
+    !user?.workspaceAdminSourceId,
     !user?.isSuspended,
     user?.id !== actor.id
   )

@@ -24,3 +24,24 @@ export async function getWorkspaceOperator(user: User): Promise<User | null> {
     ? source
     : null;
 }
+
+/**
+ * Finds the browser and collaboration session owners affected by a sign-out.
+ *
+ * @param userId The original account being signed out or revoked.
+ * @returns The account ID and its mapped account IDs.
+ */
+export async function getWorkspaceSessionUserIds(
+  userId: string
+): Promise<string[]> {
+  if (env.isCloudHosted || !env.WORKSPACE_OPERATOR_USER_IDS?.includes(userId)) {
+    return [userId];
+  }
+
+  const mappings = await User.findAll({
+    attributes: ["id"],
+    where: { workspaceAdminSourceId: userId },
+    paranoid: false,
+  });
+  return [userId, ...mappings.map((user) => user.id)];
+}

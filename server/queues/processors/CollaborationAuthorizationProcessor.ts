@@ -5,6 +5,7 @@ import type {
   DocumentUserEvent,
   Event as TEvent,
 } from "@server/types";
+import { getWorkspaceSessionUserIds } from "@server/utils/workspaceOperator";
 import BaseProcessor from "./BaseProcessor";
 
 /**
@@ -131,11 +132,12 @@ export default class CollaborationAuthorizationProcessor extends BaseProcessor {
       // The user's role, status, or tokens changed, which applies to every
       // document.
       case "users.demote":
+        return AuthenticationExtension.invalidate({ userIds: [event.userId] });
       case "users.suspend":
       case "users.delete":
       case "users.signout":
         return AuthenticationExtension.invalidate({
-          userIds: [event.userId],
+          userIds: await getWorkspaceSessionUserIds(event.userId),
         });
 
       default:

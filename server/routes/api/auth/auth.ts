@@ -10,7 +10,9 @@ import {
   AuthorizationError,
   NotFoundError,
 } from "@server/errors";
+import Logger from "@server/logging/Logger";
 import auth from "@server/middlewares/authentication";
+import { rateLimiter } from "@server/middlewares/rateLimiter";
 import { transaction } from "@server/middlewares/transaction";
 import validate from "@server/middlewares/validate";
 import { Event, Team, User } from "@server/models";
@@ -25,13 +27,15 @@ import {
   presentGroupUser,
 } from "@server/presenters";
 import ValidateSSOAccessTask from "@server/queues/tasks/ValidateSSOAccessTask";
+import { afterCommit } from "@server/storage/transaction";
 import type { APIContext } from "@server/types";
 import { AuthenticationType } from "@server/types";
+import { hash } from "@server/utils/crypto";
 import { clearCSRFCookie } from "@server/utils/csrf";
 import { getJWTPayload } from "@server/utils/jwt";
 import { getWorkspaceOperator } from "@server/utils/workspaceOperator";
 import { SessionsCookieHelper } from "@server/utils/SessionsCookieHelper";
-import RateLimiter from "@server/utils/RateLimiter";
+import RateLimiter, { RateLimiterStrategy } from "@server/utils/RateLimiter";
 import {
   AuthSwitchWorkspaceSchema,
   type AuthConfigReq,
@@ -140,9 +144,11 @@ router.post("auth.config", async (ctx: APIContext<AuthConfigReq>) => {
 const NON_SSO_SERVICES = ["email", "passkeys"];
 
 router.post("auth.info", auth(), async (ctx: APIContext<AuthInfoReq>) => {
-  const { user, service, type, token } = ctx.state.auth;
+  const { user, service, type, token, workspaceOperator } = ctx.state.auth;
   const operator =
-    type === AuthenticationType.APP ? await getWorkspaceOperator(user) : null;
+    type === AuthenticationType.APP
+      ? (workspaceOperator ?? (await getWorkspaceOperator(user)))
+      : null;
   const [team, groups, availableTeams] = await Promise.all([
     Team.scope("withDomains").findByPk(user.teamId, {
       rejectOnEmpty: true,
@@ -155,39 +161,22 @@ router.post("auth.info", auth(), async (ctx: APIContext<AuthInfoReq>) => {
         })
       : user.availableTeams(),
   ]);
-  const expiresAt =
+  const sessionExpiry =
     type === AuthenticationType.APP
       ? getJWTPayload(token).expiresAt
       : undefined;
+  const expiresAt =
+    typeof sessionExpiry === "string" ? new Date(sessionExpiry) : undefined;
   const rememberedTeams = await SessionsCookieHelper.reconcile(
     ctx,
     type === AuthenticationType.APP ? team : undefined,
-    typeof expiresAt === "string" ? new Date(expiresAt) : undefined
+    expiresAt
   );
   const signedInTeamIds = new Set(
     Object.keys(getActiveSessions(SessionsCookieHelper.read(ctx)))
   );
 
-  // If the user did not _just_ sign in then we need to check if they continue
-  // to have access to the workspace they are signed into. This only applies
-  // to SSO sessions - email and passkey logins don't have associated
-  // UserAuthentication records that need validation.
-  const requiresSSOValidation =
-    !user.workspaceAdminSourceId &&
-    (!service || !NON_SSO_SERVICES.includes(service));
-  if (
-    requiresSSOValidation &&
-    user.lastSignedInAt &&
-    user.lastSignedInAt < subHours(new Date(), 1)
-  ) {
-    await new ValidateSSOAccessTask()
-      .schedule({
-        userId: user.id,
-      })
-      .catch(() => {
-        // Ignore errors from duplicate jobId when a validation is already queued
-      });
-  }
+  await scheduleSSOValidation(workspaceOperator ?? user, service);
 
   ctx.body = {
     data: {
@@ -201,7 +190,10 @@ router.post("auth.info", auth(), async (ctx: APIContext<AuthInfoReq>) => {
       // to API or OAuth consumers
       collaborationToken:
         type === AuthenticationType.APP
-          ? user.getCollaborationToken()
+          ? user.getCollaborationToken(
+              workspaceOperator ? hash(workspaceOperator.jwtSecret) : undefined,
+              workspaceOperator ? expiresAt : undefined
+            )
           : undefined,
       availableTeams: uniqBy([...rememberedTeams, ...availableTeams], "id")
         .filter(
@@ -226,11 +218,14 @@ router.post("auth.info", auth(), async (ctx: APIContext<AuthInfoReq>) => {
 
 router.post(
   "auth.switchWorkspace",
+  rateLimiter(RateLimiterStrategy.TwentyFivePerMinute),
   auth({ type: AuthenticationType.APP, transports: ["cookie"] }),
   validate(AuthSwitchWorkspaceSchema),
+  transaction(),
   async (ctx: APIContext<AuthSwitchWorkspaceReq>) => {
-    const { user, token, service } = ctx.state.auth;
-    const operator = await getWorkspaceOperator(user);
+    const { user, token, service, workspaceOperator } = ctx.state.auth;
+    const { transaction } = ctx.state;
+    const operator = workspaceOperator ?? (await getWorkspaceOperator(user));
     if (!operator) {
       throw AuthorizationError("Workspace operator access required");
     }
@@ -244,33 +239,82 @@ router.post(
       );
     }
 
-    const team = await Team.findByPk(ctx.input.body.teamId);
+    const team = await Team.findByPk(ctx.input.body.teamId, { transaction });
     if (!team || team.isSuspended) {
       throw NotFoundError("Workspace not available");
     }
 
-    const [target] = await User.findOrCreate({
-      where: { teamId: team.id, workspaceAdminSourceId: operator.id },
-      defaults: {
-        name: operator.name,
-        language: operator.language,
-        role: UserRole.Admin,
-        lastActiveAt: new Date(),
-      },
-      paranoid: false,
-    });
-    if (target.deletedAt || target.isSuspended || !target.isAdmin) {
-      throw AuthorizationError(
-        "Workspace administrator account is unavailable"
-      );
+    let target = operator;
+    let mappingCreated = false;
+    let mappingRestored = false;
+    if (team.id !== operator.teamId) {
+      [target, mappingCreated] = await User.findOrCreate({
+        where: { teamId: team.id, workspaceAdminSourceId: operator.id },
+        defaults: {
+          name: operator.name,
+          language: operator.language,
+          role: UserRole.Admin,
+          lastActiveAt: new Date(),
+        },
+        paranoid: false,
+        transaction,
+      });
+      if (target.deletedAt || target.suspendedAt || !target.isAdmin) {
+        // Recover mappings changed by older versions without changing their IDs.
+        if (target.deletedAt) {
+          await target.restore({ transaction });
+        }
+        await target.update(
+          {
+            suspendedAt: null,
+            suspendedById: null,
+            name: operator.name,
+            role: UserRole.Admin,
+          },
+          { transaction }
+        );
+        mappingRestored = true;
+      }
     }
 
-    ctx.cookies.set(
-      "accessToken",
-      target.getSessionToken(expiresAt, service, operator.id),
-      { sameSite: "lax", expires: expiresAt }
+    const auditData = {
+      fromTeamId: user.teamId,
+      sourceTeamId: operator.teamId,
+      mappingCreated,
+      mappingRestored,
+    };
+    await Event.create(
+      {
+        name: "users.switch_workspace",
+        actorId: operator.id,
+        teamId: team.id,
+        userId: target.id,
+        ip: ctx.request.ip,
+        authType: AuthenticationType.APP,
+        data: auditData,
+      },
+      { transaction }
     );
-    clearCSRFCookie(ctx);
+    await scheduleSSOValidation(operator, service);
+
+    await afterCommit(transaction, () => {
+      ctx.cookies.set(
+        "accessToken",
+        target.getSessionToken(
+          expiresAt,
+          service,
+          target.workspaceAdminSourceId ? hash(operator.jwtSecret) : undefined
+        ),
+        { sameSite: "lax", expires: expiresAt }
+      );
+      clearCSRFCookie(ctx);
+      Logger.info("authentication", "Workspace operator switched workspaces", {
+        ...auditData,
+        operatorId: operator.id,
+        teamId: team.id,
+        userId: target.id,
+      });
+    });
     ctx.body = { success: true };
   }
 );
@@ -281,14 +325,15 @@ router.post(
   transaction(),
   async (ctx: APIContext<AuthDeleteReq>) => {
     const { auth, transaction } = ctx.state;
-    const { user, token } = auth;
+    const { user, token, workspaceOperator } = auth;
+    const account = workspaceOperator ?? user;
 
-    await user.rotateJwtSecret({ transaction });
+    await account.rotateJwtSecret({ transaction });
     await Event.createFromContext(ctx, {
       name: "users.signout",
-      userId: user.id,
+      userId: account.id,
       data: {
-        name: user.name,
+        name: account.name,
         reason: "manual",
       },
     });
@@ -307,5 +352,25 @@ router.post(
     };
   }
 );
+
+/**
+ * Schedules the normal SSO recheck for the account that actually signed in.
+ *
+ * @param user The original Outline account.
+ * @param service The service that started the browser session.
+ */
+async function scheduleSSOValidation(user: User, service?: string) {
+  if (
+    (service && NON_SSO_SERVICES.includes(service)) ||
+    !user.lastSignedInAt ||
+    user.lastSignedInAt >= subHours(new Date(), 1)
+  ) {
+    return;
+  }
+
+  await new ValidateSSOAccessTask().schedule({ userId: user.id }).catch(() => {
+    // Ignore errors from duplicate jobId when a validation is already queued.
+  });
+}
 
 export default router;

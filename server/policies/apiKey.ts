@@ -16,6 +16,7 @@ allow(User, "createApiKey", Team, (actor, team) =>
     isTeamMutable(actor),
     !actor.isGuest,
     !actor.isSuspended,
+    !actor.workspaceAdminSourceId,
     actor.isAdmin ||
       !!team?.getPreference(TeamPreference.MembersCanCreateApiKey)
   )

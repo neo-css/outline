@@ -1,9 +1,14 @@
 import { faker } from "@faker-js/faker";
+import Koa from "koa";
 import { randomUUID } from "node:crypto";
 import { CSRF } from "@shared/constants";
 import { Scope, UserRole } from "@shared/types";
 import env from "@server/env";
-import { User } from "@server/models";
+import { defaultRateLimiter } from "@server/middlewares/rateLimiter";
+import { Event, User, UserAuthentication } from "@server/models";
+import onerror from "@server/onerror";
+import ValidateSSOAccessTask from "@server/queues/tasks/ValidateSSOAccessTask";
+import webService from "@server/services/web";
 import {
   buildAdmin,
   buildApiKey,
@@ -14,7 +19,10 @@ import {
   buildSubdomain,
 } from "@server/test/factories";
 import { getTestServer, setSelfHosted } from "@server/test/support";
+import TestServer from "@server/test/TestServer";
 import { bundleToken, generateRawToken } from "@server/utils/csrf";
+import { getJWTPayload, getUserForJWT } from "@server/utils/jwt";
+import RateLimiter from "@server/utils/RateLimiter";
 
 const server = getTestServer();
 
@@ -147,19 +155,25 @@ describe("#auth.switchWorkspace", () => {
     env.WORKSPACE_OPERATOR_USER_IDS = originalOperators;
   });
 
-  function sessionCookie(user: User) {
-    return `accessToken=${user.getSessionToken(new Date(Date.now() + 60_000), "oidc")}`;
+  function sessionCookie(
+    user: User,
+    expiresAt = new Date(Date.now() + 60_000)
+  ) {
+    return `accessToken=${user.getSessionToken(expiresAt, "oidc")}`;
   }
 
-  function switchWorkspace(cookie: string, teamId: string) {
+  function cookieHeaders(cookie: string) {
     const csrf = bundleToken(generateRawToken(16), env.SECRET_KEY);
+    return {
+      Cookie: `${cookie}; ${CSRF.cookieName}=${csrf}`,
+      [CSRF.headerName]: csrf,
+    };
+  }
 
-    return server.post("/api/auth.switchWorkspace", {
+  function switchWorkspace(cookie: string, teamId: string, client = server) {
+    return client.post("/api/auth.switchWorkspace", {
       body: { teamId },
-      headers: {
-        Cookie: `${cookie}; ${CSRF.cookieName}=${csrf}`,
-        [CSRF.headerName]: csrf,
-      },
+      headers: cookieHeaders(cookie),
     });
   }
 
@@ -212,6 +226,22 @@ describe("#auth.switchWorkspace", () => {
         where: { workspaceAdminSourceId: operator.id, teamId: teamB.id },
       })
     ).toEqual(1);
+    const events = await Event.findAll({
+      where: {
+        name: "users.switch_workspace",
+        actorId: operator.id,
+        teamId: teamB.id,
+        userId: bData.user.id,
+      },
+    });
+    expect(events).toHaveLength(2);
+    expect(events.filter((event) => event.data?.mappingCreated)).toHaveLength(
+      1
+    );
+    expect(events[0].data).toMatchObject({
+      fromTeamId: operator.teamId,
+      sourceTeamId: operator.teamId,
+    });
 
     const inC = switchedCookie(await switchWorkspace(inB, teamC.id));
     const backInB = switchedCookie(await switchWorkspace(inC, teamB.id));
@@ -245,6 +275,261 @@ describe("#auth.switchWorkspace", () => {
       (await server.post("/api/auth.info", { headers: { Cookie: otherInB } }))
         .status
     ).toEqual(200);
+  });
+
+  it.each([
+    [UserRole.Admin, false],
+    [UserRole.Admin, true],
+    [UserRole.Member, true],
+  ] as const)(
+    "restores the original %s (existing mapping: %s)",
+    async (role, hasExistingMapping) => {
+      const operator = await buildUser({ role });
+      const otherTeam = await buildTeam();
+      env.WORKSPACE_OPERATOR_USER_IDS = [operator.id];
+
+      if (hasExistingMapping) {
+        await buildAdmin({
+          teamId: operator.teamId,
+          workspaceAdminSourceId: operator.id,
+          email: null,
+        });
+      }
+
+      const away = switchedCookie(
+        await switchWorkspace(sessionCookie(operator), otherTeam.id)
+      );
+      const atHome = switchedCookie(
+        await switchWorkspace(away, operator.teamId)
+      );
+      const info = await server.post("/api/auth.info", {
+        headers: { Cookie: atHome },
+      });
+      expect(info.status).toEqual(200);
+      const data = (await info.json()).data;
+      expect(data.team.id).toEqual(operator.teamId);
+      expect(data.user).toMatchObject({
+        id: operator.id,
+        email: operator.email,
+        role,
+      });
+      expect(
+        await User.count({
+          where: {
+            teamId: operator.teamId,
+            workspaceAdminSourceId: operator.id,
+          },
+          paranoid: false,
+        })
+      ).toEqual(hasExistingMapping ? 1 : 0);
+    }
+  );
+
+  it.each(["source", "mapped", "sso"] as const)(
+    "revokes the source and every mapped session after %s sign-out",
+    async (reason) => {
+      const operator = await buildAdmin();
+      const teamB = await buildTeam();
+      const teamC = await buildTeam();
+      env.WORKSPACE_OPERATOR_USER_IDS = [operator.id];
+
+      const expiresAt = new Date(Date.now() + 60_000);
+      const sourceCookie = sessionCookie(operator, expiresAt);
+      const inB = switchedCookie(await switchWorkspace(sourceCookie, teamB.id));
+      const inC = switchedCookie(await switchWorkspace(inB, teamC.id));
+      const info = await server.post("/api/auth.info", {
+        headers: { Cookie: inC },
+      });
+      const { collaborationToken } = (await info.json()).data;
+      expect(getJWTPayload(collaborationToken).expiresAt).toEqual(
+        expiresAt.toISOString()
+      );
+      await expect(
+        getUserForJWT(collaborationToken, ["collaboration"])
+      ).resolves.toMatchObject({
+        user: { teamId: teamC.id },
+      });
+
+      if (reason === "sso") {
+        const provider = vi
+          .spyOn(UserAuthentication.prototype, "validateAccess")
+          .mockResolvedValue(false);
+        try {
+          await new ValidateSSOAccessTask().perform({ userId: operator.id });
+        } finally {
+          provider.mockRestore();
+        }
+      } else {
+        const response = await server.post("/api/auth.delete", {
+          headers: cookieHeaders(reason === "source" ? sourceCookie : inB),
+        });
+        expect(response.status).toEqual(200);
+      }
+
+      for (const cookie of [sourceCookie, inB, inC]) {
+        const response = await server.post("/api/auth.info", {
+          headers: { Cookie: cookie },
+        });
+        expect(response.status).toEqual(401);
+      }
+      await expect(
+        getUserForJWT(collaborationToken, ["collaboration"])
+      ).rejects.toThrow("Workspace operator access required");
+    }
+  );
+
+  it("revalidates the original SSO account from a mapped session", async () => {
+    const operator = await buildAdmin({
+      lastSignedInAt: new Date(Date.now() - 7_200_000),
+    });
+    const target = await buildTeam();
+    env.WORKSPACE_OPERATOR_USER_IDS = [operator.id];
+    const schedule = vi.spyOn(ValidateSSOAccessTask.prototype, "schedule");
+    try {
+      const cookie = switchedCookie(
+        await switchWorkspace(sessionCookie(operator), target.id)
+      );
+      expect(schedule).toHaveBeenCalledWith({ userId: operator.id });
+      schedule.mockClear();
+
+      const response = await server.post("/api/auth.info", {
+        headers: { Cookie: cookie },
+      });
+      expect(response.status).toEqual(200);
+      expect(schedule).toHaveBeenCalledWith({ userId: operator.id });
+    } finally {
+      schedule.mockRestore();
+    }
+  });
+
+  it("repairs the original mapping ID if an older version removed it", async () => {
+    const operator = await buildAdmin();
+    const admin = await buildAdmin();
+    const mapped = await buildUser({
+      teamId: admin.teamId,
+      workspaceAdminSourceId: operator.id,
+      name: "Unknown",
+      email: null,
+      role: UserRole.Member,
+      deletedAt: new Date(),
+      suspendedAt: new Date(),
+    });
+    env.WORKSPACE_OPERATOR_USER_IDS = [operator.id];
+
+    const cookie = switchedCookie(
+      await switchWorkspace(sessionCookie(operator), admin.teamId)
+    );
+    const response = await server.post("/api/auth.info", {
+      headers: { Cookie: cookie },
+    });
+    expect(response.status).toEqual(200);
+    const { user } = (await response.json()).data;
+    expect(user).toMatchObject({
+      id: mapped.id,
+      name: operator.name,
+      role: UserRole.Admin,
+    });
+  });
+
+  it("protects mapped accounts and the last active workspace administrator", async () => {
+    const operator = await buildAdmin();
+    const admin = await buildAdmin();
+    const suspendedAdmin = await buildAdmin({
+      teamId: admin.teamId,
+      suspendedAt: new Date(),
+    });
+    env.WORKSPACE_OPERATOR_USER_IDS = [operator.id];
+
+    const cookie = switchedCookie(
+      await switchWorkspace(sessionCookie(operator), admin.teamId)
+    );
+    const info = await server.post("/api/auth.info", {
+      headers: { Cookie: cookie },
+    });
+    const { user } = (await info.json()).data;
+    for (const path of ["users.update_role", "users.suspend", "users.delete"]) {
+      const response = await server.post(`/api/${path}`, admin, {
+        body: {
+          id: user.id,
+          ...(path === "users.update_role" && { role: UserRole.Member }),
+        },
+      });
+      expect(response.status).toEqual(403);
+    }
+    for (const path of ["users.update_role", "users.suspend", "users.delete"]) {
+      const response = await server.post(`/api/${path}`, {
+        headers: cookieHeaders(cookie),
+        body: {
+          id: admin.id,
+          ...(path === "users.update_role" && { role: UserRole.Member }),
+        },
+      });
+      expect(response.status).toEqual(400);
+    }
+    await admin.reload();
+    expect(admin).toMatchObject({
+      role: UserRole.Admin,
+      suspendedAt: null,
+      deletedAt: null,
+    });
+    expect(suspendedAdmin.isSuspended).toBe(true);
+  });
+
+  it("rejects new credentials on a mapped account", async () => {
+    const operator = await buildAdmin();
+    const team = await buildTeam({ passkeysEnabled: true });
+    env.WORKSPACE_OPERATOR_USER_IDS = [operator.id];
+    const cookie = switchedCookie(
+      await switchWorkspace(sessionCookie(operator), team.id)
+    );
+
+    const apiKey = await server.post("/api/apiKeys.create", {
+      headers: cookieHeaders(cookie),
+      body: { name: "test-key" },
+    });
+    expect(apiKey.status).toEqual(403);
+    const passkey = await server.post(
+      "/auth/passkeys.generateRegistrationOptions",
+      {
+        headers: cookieHeaders(cookie),
+      }
+    );
+    expect(passkey.status).toEqual(403);
+  });
+
+  it("uses the same switch rate limit across the original and mapped accounts", async () => {
+    const operator = await buildAdmin();
+    const otherTeam = await buildTeam();
+    env.WORKSPACE_OPERATOR_USER_IDS = [operator.id];
+    const originalEnabled = env.RATE_LIMITER_ENABLED;
+    const originalMultiplier = env.RATE_LIMITER_MULTIPLIER;
+    const path = RateLimiter.normalizePath("/api/auth.switchWorkspace");
+    const app = new Koa();
+    app.use(defaultRateLimiter());
+    onerror(webService(app));
+    const limitedServer = new TestServer(app);
+    env.RATE_LIMITER_ENABLED = true;
+    env.RATE_LIMITER_MULTIPLIER = 0.04;
+    try {
+      const cookie = switchedCookie(
+        await switchWorkspace(
+          sessionCookie(operator),
+          otherTeam.id,
+          limitedServer
+        )
+      );
+      const limited = await switchWorkspace(
+        cookie,
+        operator.teamId,
+        limitedServer
+      );
+      expect(limited.status).toEqual(429);
+    } finally {
+      env.RATE_LIMITER_ENABLED = originalEnabled;
+      env.RATE_LIMITER_MULTIPLIER = originalMultiplier;
+      RateLimiter.rateLimiterMap.delete(path);
+      limitedServer.close();
+    }
   });
 
   it("keeps the switch unavailable to an ordinary administrator or member", async () => {

@@ -38,6 +38,7 @@ import {
   presentImport,
 } from "@server/presenters";
 import presentNotification from "@server/presenters/notification";
+import { getWorkspaceSessionUserIds } from "@server/utils/workspaceOperator";
 import type { Event } from "../../types";
 
 export default class WebsocketsProcessor {
@@ -1034,18 +1035,18 @@ export default class WebsocketsProcessor {
       }
 
       case "users.signout":
-      case "users.suspend": {
-        // authentication is no longer valid, disconnect all of the user's clients.
-        return socketio.in(`user-${event.userId}`).disconnectSockets(true);
-      }
-
+      case "users.suspend":
       case "users.delete": {
-        socketio
-          .to(`team-${event.teamId}`)
-          .emit(event.name, { modelId: event.userId });
+        if (event.name === "users.delete") {
+          socketio
+            .to(`team-${event.teamId}`)
+            .emit(event.name, { modelId: event.userId });
+        }
 
-        // authentication is no longer valid, disconnect all of the user's clients.
-        return socketio.in(`user-${event.userId}`).disconnectSockets(true);
+        const userIds = await getWorkspaceSessionUserIds(event.userId);
+        return socketio
+          .in(userIds.map((id) => `user-${id}`))
+          .disconnectSockets(true);
       }
 
       case "userMemberships.update": {

@@ -640,13 +640,13 @@ class User extends ParanoidModel<
    *
    * @param expiresAt The time the token will expire at
    * @param service The authentication service used to generate the token, if applicable
-   * @param workspaceAdminSourceId The operator authorized to use a mapped account
+   * @param workspaceOperatorSession The source session fingerprint for a mapped account
    * @returns The session token
    */
   getSessionToken = (
     expiresAt?: Date,
     service?: string,
-    workspaceAdminSourceId?: string
+    workspaceOperatorSession?: string
   ) =>
     JWT.sign(
       {
@@ -654,7 +654,8 @@ class User extends ParanoidModel<
         expiresAt: expiresAt ? expiresAt.toISOString() : undefined,
         type: "session",
         service,
-        workspaceAdminSourceId,
+        workspaceAdminSourceId: this.workspaceAdminSourceId ?? undefined,
+        workspaceOperatorSession,
       },
       this.jwtSecret
     );
@@ -663,18 +664,31 @@ class User extends ParanoidModel<
    * Returns a session token that is used to make collaboration requests and is
    * stored in the client memory.
    *
+   * @param workspaceOperatorSession The source session fingerprint for a mapped account
+   * @param sessionExpiry The expiration time of the mapped browser session
    * @returns The session token
    */
-  getCollaborationToken = () =>
-    JWT.sign(
+  getCollaborationToken = (
+    workspaceOperatorSession?: string,
+    sessionExpiry?: Date
+  ) => {
+    const defaultExpiry = addHours(new Date(), 24);
+    const expiresAt =
+      sessionExpiry && sessionExpiry < defaultExpiry
+        ? sessionExpiry
+        : defaultExpiry;
+
+    return JWT.sign(
       {
         id: this.id,
-        expiresAt: addHours(new Date(), 24).toISOString(),
+        expiresAt: expiresAt.toISOString(),
         type: "collaboration",
         workspaceAdminSourceId: this.workspaceAdminSourceId ?? undefined,
+        workspaceOperatorSession,
       },
       this.jwtSecret
     );
+  };
 
   /**
    * Returns a temporary token that is only used for transferring a session
@@ -800,7 +814,7 @@ class User extends ParanoidModel<
     model: User,
     { transaction }: { transaction: Transaction }
   ) {
-    if (model.role !== UserRole.Admin) {
+    if (model.role !== UserRole.Admin || model.workspaceAdminSourceId) {
       return;
     }
 
@@ -816,6 +830,8 @@ class User extends ParanoidModel<
       where: {
         teamId: model.teamId,
         role: UserRole.Admin,
+        workspaceAdminSourceId: null,
+        suspendedAt: null,
         id: {
           [Op.ne]: model.id,
         },
@@ -855,39 +871,47 @@ class User extends ParanoidModel<
   };
 
   @BeforeUpdate
-  static async checkRoleChange(
+  static async checkAdminAvailability(
     model: User,
     options: InstanceUpdateOptions<InferAttributes<User>>
   ) {
-    const previousRole = model.previous("role");
-
-    if (
+    const demoting =
       model.changed("role") &&
-      previousRole === UserRole.Admin &&
-      UserRoleHelper.isRoleLower(model.role, UserRole.Admin)
+      UserRoleHelper.isRoleLower(model.role, UserRole.Admin);
+    const suspending =
+      model.changed("suspendedAt") &&
+      !!model.suspendedAt &&
+      !model.previous("suspendedAt");
+    if (
+      model.workspaceAdminSourceId ||
+      model.previous("role") !== UserRole.Admin ||
+      (!demoting && !suspending)
     ) {
-      // Shares the lock name with the deletion checks, so a demotion and a
-      // deletion cannot each count the other account as the remaining admin.
-      await LockHelper.acquire(
-        model.sequelize,
-        `users:${model.teamId}`,
-        options.transaction
-      );
+      return;
+    }
 
-      const { count } = await this.findAndCountAll({
-        where: {
-          teamId: model.teamId,
-          role: UserRole.Admin,
-          id: {
-            [Op.ne]: model.id,
-          },
+    // Share the deletion lock so concurrent changes cannot count each other.
+    await LockHelper.acquire(
+      model.sequelize,
+      `users:${model.teamId}`,
+      options.transaction
+    );
+
+    const otherAdmin = await this.findOne({
+      attributes: ["id"],
+      where: {
+        teamId: model.teamId,
+        role: UserRole.Admin,
+        workspaceAdminSourceId: null,
+        suspendedAt: null,
+        id: {
+          [Op.ne]: model.id,
         },
-        limit: 1,
-        transaction: options.transaction,
-      });
-      if (count === 0) {
-        throw ValidationError("At least one admin is required");
-      }
+      },
+      transaction: options.transaction,
+    });
+    if (!otherAdmin) {
+      throw ValidationError("At least one admin is required");
     }
   }
 

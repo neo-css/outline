@@ -1,6 +1,8 @@
 import { CollectionPermission } from "@shared/types";
 import AuthenticationExtension from "@server/collaboration/AuthenticationExtension";
-import { buildDocument } from "@server/test/factories";
+import env from "@server/env";
+import { buildAdmin, buildDocument } from "@server/test/factories";
+import { setSelfHosted } from "@server/test/support";
 import type { CollectionUserEvent } from "@server/types";
 import CollaborationAuthorizationProcessor from "./CollaborationAuthorizationProcessor";
 
@@ -25,6 +27,28 @@ describe("CollaborationAuthorizationProcessor", () => {
     vi.spyOn(AuthenticationExtension, "invalidate").mockResolvedValue();
 
   afterEach(() => vi.restoreAllMocks());
+
+  it("invalidates mapped collaboration connections when the operator is signed out", async () => {
+    setSelfHosted();
+    const operator = await buildAdmin();
+    const mapped = await buildAdmin({ workspaceAdminSourceId: operator.id });
+    const originalOperators = env.WORKSPACE_OPERATOR_USER_IDS;
+    const spy = invalidate();
+
+    env.WORKSPACE_OPERATOR_USER_IDS = [operator.id];
+    try {
+      await processor.perform({
+        name: "users.signout",
+        userId: operator.id,
+        actorId: operator.id,
+        teamId: operator.teamId,
+        ip: null,
+      });
+      expect(spy).toHaveBeenCalledWith({ userIds: [operator.id, mapped.id] });
+    } finally {
+      env.WORKSPACE_OPERATOR_USER_IDS = originalOperators;
+    }
+  });
 
   it("should invalidate when a membership is created", async () => {
     const spy = invalidate();

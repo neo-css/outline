@@ -41,7 +41,7 @@ async function getRateLimiterIdentifiers(ctx: AppContext): Promise<string[]> {
     let userId = await RateLimiter.getCachedUserIdForToken(token);
     if (!userId) {
       const { user } = await getUserForJWT(token);
-      userId = user.id;
+      userId = user.workspaceAdminSourceId ?? user.id;
       void RateLimiter.cacheUserForToken(token, userId);
     }
     return [userId];

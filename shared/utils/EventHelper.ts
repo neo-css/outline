@@ -71,6 +71,7 @@ export class EventHelper {
     "users.update",
     "users.signin",
     "users.signout",
+    "users.switch_workspace",
     "users.promote",
     "users.demote",
     "users.invite",

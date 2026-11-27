@@ -49,7 +49,12 @@ export function getJWTPayload(token: string) {
 export async function getUserForJWT(
   token: string,
   allowedTypes = ["session"]
-): Promise<{ user: User; service?: string; expiresAt?: Date }> {
+): Promise<{
+  user: User;
+  service?: string;
+  expiresAt?: Date;
+  workspaceOperator?: User;
+}> {
   const payload = getJWTPayload(token);
   const expiresAt = payload.expiresAt ? new Date(payload.expiresAt) : undefined;
 
@@ -90,13 +95,20 @@ export async function getUserForJWT(
     });
   }
 
-  if (
-    user.workspaceAdminSourceId &&
-    (payload.workspaceAdminSourceId !== user.workspaceAdminSourceId ||
+  let workspaceOperator: User | undefined;
+  if (user.workspaceAdminSourceId) {
+    const source = await getWorkspaceOperator(user);
+    if (
+      !source ||
       !user.isAdmin ||
-      !(await getWorkspaceOperator(user)))
-  ) {
-    throw AuthenticationError("Workspace operator access required");
+      !expiresAt ||
+      !Number.isFinite(expiresAt.getTime()) ||
+      payload.workspaceAdminSourceId !== source.id ||
+      payload.workspaceOperatorSession !== hash(source.jwtSecret)
+    ) {
+      throw AuthenticationError("Workspace operator access required");
+    }
+    workspaceOperator = source;
   }
 
   if (payload.type === "transfer") {
@@ -115,6 +127,7 @@ export async function getUserForJWT(
     user,
     service: payload.service as string | undefined,
     expiresAt,
+    workspaceOperator,
   };
 }
 

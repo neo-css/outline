@@ -62,6 +62,8 @@ export type Authentication = {
   service?: string;
   /** The OAuth scopes granted for this session, if applicable. */
   scope?: string[];
+  /** The verified original user behind a mapped workspace session. */
+  workspaceOperator?: User;
 };
 
 export type Pagination = {
@@ -170,6 +172,16 @@ export type UserEvent = BaseEvent<User> &
           | "users.delete"
           | "users.invite_accepted";
         userId: string;
+      }
+    | {
+        name: "users.switch_workspace";
+        userId: string;
+        data: {
+          fromTeamId: string;
+          sourceTeamId: string;
+          mappingCreated: boolean;
+          mappingRestored: boolean;
+        };
       }
     | {
         name: "users.signout";

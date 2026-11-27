@@ -59,7 +59,7 @@ export default function auth(options: AuthenticationOptions = {}) {
     }
 
     try {
-      const { type, token, user, service, scope } =
+      const { type, token, user, service, scope, workspaceOperator } =
         await validateAuthentication(ctx, options);
 
       await Promise.all([
@@ -73,6 +73,7 @@ export default function auth(options: AuthenticationOptions = {}) {
         type,
         service,
         scope,
+        ...(workspaceOperator && { workspaceOperator }),
       };
 
       if (tracer) {
@@ -174,6 +175,7 @@ async function validateAuthentication(
   type: AuthenticationType;
   service?: string;
   scope?: string[];
+  workspaceOperator?: User;
 }> {
   const { token, transport } = parseAuthentication(ctx, options.transports);
 
@@ -185,6 +187,7 @@ async function validateAuthentication(
   let type: AuthenticationType;
   let service: string | undefined;
   let scope: string[] | undefined;
+  let workspaceOperator: User | undefined;
 
   if (OAuthAuthentication.match(token)) {
     if (transport !== "header") {
@@ -285,6 +288,7 @@ async function validateAuthentication(
     const result = await getUserForJWT(token);
     user = result.user;
     service = result.service;
+    workspaceOperator = result.workspaceOperator;
   }
 
   if (user.isSuspended) {
@@ -321,5 +325,6 @@ async function validateAuthentication(
     token,
     service,
     scope,
+    workspaceOperator,
   };
 }
